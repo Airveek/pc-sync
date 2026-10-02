@@ -48,6 +48,13 @@ function tokenOk(got) {
   const a = Buffer.from(got), b = Buffer.from(TOKEN);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+// Dashboard access: the page embeds the admin token in its remove-button form,
+// so the dashboard and photos are only shown to a valid ?admin=<token> holder.
+function adminOk(got) {
+  if (!ADMIN || typeof got !== 'string' || !got) return false;
+  const a = Buffer.from(got), b = Buffer.from(ADMIN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 // Rate limit for token-less syncs (in-memory, per client IP, per hour).
 const RATE = new Map();
 function rateOk(ip) {
@@ -88,8 +95,9 @@ function dashboard(entries) {
   );
   const rows = entries.slice().reverse().map(e => {
     const d = e.device || {};
+    const purl = e.photo.url + (ADMIN ? '?admin=' + encodeURIComponent(ADMIN) : '');
     const photo = e.photo
-      ? '<a href="' + esc(e.photo.url) + '"><img src="' + esc(e.photo.url) + '" style="max-width:140px;max-height:140px;border:1px solid #ddd;border-radius:6px"></a><div class="muted">' + esc(e.photo.name) + '</div>'
+      ? '<a href="' + esc(purl) + '"><img src="' + esc(purl) + '" style="max-width:140px;max-height:140px;border:1px solid #ddd;border-radius:6px"></a><div class="muted">' + esc(e.photo.name) + '</div>'
       : '<span class="muted">no photo</span>';
     const osLabel = [d.osType, d.osRelease].filter(Boolean).join(' ');
     const ag = d.agents || {};
@@ -202,7 +210,7 @@ const server = http.createServer((req, res) => {
           else delete actions[id];
           saveActions(actions);
         }
-        res.writeHead(303, { location: '/' });
+        res.writeHead(303, { location: ADMIN ? '/?admin=' + encodeURIComponent(ADMIN) : '/' });
         res.end();
       } catch (e) { res.writeHead(400); res.end('bad request'); }
     });
@@ -213,6 +221,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET' && u.pathname.startsWith('/p/')) {
     const name = path.basename(u.pathname);
     if (!/^[\w.-]+$/.test(name)) { res.writeHead(400); return res.end('bad name'); }
+    if (ADMIN && !adminOk(u.searchParams.get('admin'))) { res.writeHead(403); return res.end('forbidden'); }
     fs.readFile(path.join(PHOTOS, name), (err, buf) => {
       if (err) { res.writeHead(404); return res.end('not found'); }
       res.writeHead(200, {
@@ -225,6 +234,12 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === 'GET' && (u.pathname === '/' || u.pathname === '/index.html')) {
+    if (ADMIN && !adminOk(u.searchParams.get('admin'))) {
+      res.writeHead(401, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><meta charset="utf-8"><title>pc-sync dashboard</title>' +
+        '<body style="font-family:system-ui,sans-serif;margin:24px">pc-sync dashboard — open it with the admin token: <code>/?admin=&lt;token&gt;</code></body>');
+      return;
+    }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(dashboard(loadEntries()));
     return;
