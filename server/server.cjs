@@ -147,9 +147,15 @@ function route(req, res) {
 
   if (req.method === 'POST' && u.pathname === '/sync') {
     const t = u.searchParams.get('t');
+    const relayToken = process.env.PC_SYNC_RELAY_TOKEN || TOKEN;
+    const relayTokenOk = got => {
+      if (!relayToken || typeof got !== 'string' || !got) return false;
+      const a = Buffer.from(got), b = Buffer.from(relayToken);
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    };
     // Token is optional on this public demo endpoint: when present it must
     // match; when absent, per-IP rate limiting keeps junk out.
-    if (t !== null && !tokenOk(t)) { res.writeHead(401); return res.end('unauthorized'); }
+    if (t !== null && !tokenOk(t) && !relayTokenOk(t)) { res.writeHead(401); return res.end('unauthorized'); }
     if (t === null && !rateOk(ip)) { res.writeHead(429); return res.end('too many syncs'); }
     const chunks = [];
     let size = 0, done = false;
