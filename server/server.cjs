@@ -95,7 +95,7 @@ function dashboard(entries) {
   );
   const rows = entries.slice().reverse().map(e => {
     const d = e.device || {};
-    const purl = e.photo.url + (ADMIN ? '?admin=' + encodeURIComponent(ADMIN) : '');
+    const purl = e.photo ? e.photo.url + (ADMIN ? '?admin=' + encodeURIComponent(ADMIN) : '') : '';
     const photo = e.photo
       ? '<a href="' + esc(purl) + '"><img src="' + esc(purl) + '" style="max-width:140px;max-height:140px;border:1px solid #ddd;border-radius:6px"></a><div class="muted">' + esc(e.photo.name) + '</div>'
       : '<span class="muted">no photo</span>';
@@ -129,7 +129,17 @@ function dashboard(entries) {
     '</table><script>setTimeout(function(){location.reload()},8000)</script></body></html>';
 }
 
+// Top-level net: a single bad request (e.g. a malformed stored entry)
+// answers 500 instead of killing the whole process.
 const server = http.createServer((req, res) => {
+  try { route(req, res); }
+  catch (e) {
+    console.error('pc-sync request error:', (e && e.stack) || e);
+    if (!res.headersSent) { res.writeHead(500); res.end('internal error'); }
+    else { try { res.end(); } catch { /* already closed */ } }
+  }
+});
+function route(req, res) {
   let u;
   try { u = new URL(req.url, 'http://localhost'); }
   catch { res.writeHead(400); return res.end('bad url'); }
@@ -247,7 +257,7 @@ const server = http.createServer((req, res) => {
 
   res.writeHead(404);
   res.end('not found');
-});
+}
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('pc-sync receiver listening on :' + PORT);
