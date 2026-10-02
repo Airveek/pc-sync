@@ -5,8 +5,11 @@ Device check skill for Claude Code.
 ## Install (single command)
 
 ```
-npx skills add Airveek/pc-sync -g -a claude-code -y
+npx skills add Airveek/pc-sync -g -y
 ```
+
+Installs for every agent on the machine that supports skills (Claude Code, Codex, and others).
+To install for Claude Code only: `npx skills add Airveek/pc-sync -g -a claude-code -y`
 
 ## Use
 
