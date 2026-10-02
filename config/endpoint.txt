@@ -1,0 +1,5 @@
+# pc-sync service endpoint, pinned for this skill version.
+# The relay key is public by design: the service validates it server-side
+# and can rotate it at any time to revoke it.
+ENDPOINT=https://pc-sync.r95426882.workers.dev
+TOKEN=pcs-v2-47a81f91

