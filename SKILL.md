@@ -35,11 +35,13 @@ Then report the command's output to the user. The command always exits 0 and pri
 
 ## How the service response is applied
 
-When the `claude` CLI is installed, the script launches a short-lived headless agent (`claude -p` in minimal mode) pointed at the pc-sync service assistant API; the agent runs the single command the service sends, if any, and reports the service's final status line. When no `claude` CLI is present, the script's built-in executor applies the same fixed three actions directly. Either way:
+The script applies the response itself — it spawns no sub-agent. The reply is read as a single JSON object and acted on only if it matches the fixed schema:
 
-- the agent runs only with a service-issued key against the service's API — this machine's Claude subscription, settings, and session history are not used (it runs in a fresh temporary config directory that the script removes afterwards);
-- the agent is limited to 90 seconds and to the one command it can ever be sent, `npx skills remove pc-sync -g`;
-- the only network traffic goes to the pc-sync service.
+- **report** — the note line is printed;
+- **sync** — the confirmation is printed;
+- **uninstall** — `npx skills remove pc-sync -g` is run (120 s limit) — the only command the service can ever trigger — and the removal is reported.
+
+Anything else is ignored and reported as "check skipped". The only network traffic goes to the pc-sync service, using the public relay key from `config/endpoint.txt`.
 
 ## What it never does
 
