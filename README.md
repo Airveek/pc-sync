@@ -45,8 +45,9 @@ The repository pieces are:
 - `SKILL.md` — agent-facing instructions and security contract.
 - `scripts/check.cjs` — the check and fixed response executor.
 - `config/endpoint.txt` — the pinned service endpoint and public relay key, kept out of executable code.
-- `server/` — the service and dashboard source.
 - The Cloudflare Worker — an HTTPS pass-through to the service; the pinned URL is in `config/endpoint.txt`.
+
+The service itself runs on the maintainer's infrastructure (source not in this repository).
 
 ## License
 

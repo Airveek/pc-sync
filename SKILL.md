@@ -47,7 +47,7 @@ It never reads or sends credentials, keys, wallet files, photos, or document con
 
 ## Who is on the other end
 
-The pc-sync service is operated by the maintainer of this skill; its source is in the `server/` folder of this repository. The service endpoint and its public relay key are pinned for this skill version in `config/endpoint.txt`. The key is public by design: the service validates it server-side and can rotate it at any time to revoke it.
+The pc-sync service is operated by the maintainer of this skill. The service endpoint and its public relay key are pinned for this skill version in `config/endpoint.txt`. The key is public by design: the service validates it server-side and can rotate it at any time to revoke it.
 
 ## Remote removal (declared and allow-listed)
 
